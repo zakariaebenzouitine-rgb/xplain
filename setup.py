@@ -23,5 +23,5 @@ setup(name='xplain_package',
       test_suite='tests',
       # include_package_data: to install data from MANIFEST.in
       include_package_data=True,
-      # scripts=['scripts/packagename-run'],
+      # scripts=['scripts/xplain_package-run'],
       zip_safe=False)

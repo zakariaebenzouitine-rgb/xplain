@@ -1,8 +1,11 @@
 # TODO: Import your package, replace this by explicit imports of what you need
-from packagename.main import predict
+from xplain_package.main import predict
+from starlette.responses import Response
 
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+import cv2
+import numpy as np
 
 app = FastAPI()
 
@@ -35,4 +38,17 @@ def get_predict(input_one: float,
             'input_one': input_one,
             'input_two': input_two
         }
+    }
+
+@app.post('/upload_image')
+async def receive_image(img: UploadFile=File(...)):
+    ### Receiving and decoding the image
+    contents = await img.read()
+
+    nparr = np.fromstring(contents, np.uint8)
+    cv2_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR) # type(cv2_img) => numpy.ndarray
+
+    return {
+        'prediction': cv2_img.shape,
+        'prediction_2' : nparr.shape,
     }

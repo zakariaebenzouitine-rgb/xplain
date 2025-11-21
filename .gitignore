@@ -1,64 +1,105 @@
-# Standard python ignores
-*.egg-info
-.coverage
-.ipynb_checkpoints
-**/__pycache__/
-.python-version
-*.pyc
-**/build
-
-# Ignore these macos generated files
-.DS_Store
-
-# Ignore these Windows generated files
-*Zone.Identifier
-
-# Ignore VS Code generated files
-*.vscode
-
-# Raw data
-raw_data/
-*.csv
-*.sqlite
-*.zip
-
-# Data in the package
-# Add files you want to include in the git repo using `git add -f file_name`
-data/
-
-# Saved models
-models/
-*.joblib
-*.h5
-
-# Any pickle files
-*.pickle
-*.pckl
-*.pkl
-
-# Credentials (or files with potentially credentials inside)
-.env.yaml
-.credentials
-secrets.toml
-*.json
-
-# User defined extras
-# Complete to your desire
-
 # ============================================================
-# Local environment files (never commit)
+# XPLAIN .gitignore  (safe for src/ layout)
 # ============================================================
+
+# ------------------------------------------------------------
+# 1) Environment / secrets (never commit)
+# ------------------------------------------------------------
 .env
+.env.*
+!.env.example
+!.env.sample
+.env.yaml
+.env.yml
 
-# ============================================================
-# Model weights / checkpoints (never commit)
-# We keep the folder name so code can still write there.
-# ============================================================
-models/*
-!models/.gitkeep
+# ------------------------------------------------------------
+# 2) Python cache / compiled files
+# ------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
 
-# ============================================================
-# Optional local data samples (if you don't want them in git)
-# If you DO want to version raw_data samples, comment this out.
-# ============================================================
-# raw_data/*
+# ------------------------------------------------------------
+# 3) Virtual environments
+# ------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ------------------------------------------------------------
+# 4) Build / packaging artifacts
+# ------------------------------------------------------------
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+*.whl
+
+# ------------------------------------------------------------
+# 5) Jupyter / notebooks artifacts
+# ------------------------------------------------------------
+.ipynb_checkpoints/
+*.nbconvert.ipynb
+
+# ------------------------------------------------------------
+# 6) OS / editor junk
+# ------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ------------------------------------------------------------
+# 7) Logs
+# ------------------------------------------------------------
+*.log
+logs/
+log/
+
+# ------------------------------------------------------------
+# 8) Test / coverage artifacts
+# ------------------------------------------------------------
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+.cache/
+
+# ------------------------------------------------------------
+# 9) DATA + MODEL WEIGHTS (ROOT ONLY)
+#
+# IMPORTANT:
+# - Leading "/" means "only at repo root"
+# - So src/xplain_package/models/ (code) is NOT ignored.
+# ------------------------------------------------------------
+
+# Ignore ONLY the repo-root models/ folder contents (weights)
+#/models is tracked via .gitkeep
+/models/*
+!/models/.gitkeep
+
+# Optional: ignore ONLY repo-root raw_data if you want
+# (commented out so you can still version small samples)
+# /raw_data/*
+
+# Optional: ignore big local datasets at repo root
+# /data/*
+# /datasets/*
+# /downloads/*
+
+# ------------------------------------------------------------
+# 10) Docker leftovers (optional)
+# ------------------------------------------------------------
+*.tar
+*.tgz
+
+# ------------------------------------------------------------
+# 11) Misc
+# ------------------------------------------------------------
+tmp/
+temp/

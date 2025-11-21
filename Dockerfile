@@ -30,6 +30,7 @@ COPY README.md /app/README.md
 # 6) Copy inference code (src-layout) + API
 COPY src /app/src
 COPY api /app/api
+COPY scripts /app/scripts
 
 # 7) Install your package from src/
 #    (not editable in Docker; clean install)
@@ -41,4 +42,7 @@ ENV PORT=8080
 
 # 9) Start FastAPI
 #    JSON CMD handles signals correctly
-CMD ["uvicorn", "api.fast:app", "--host", "0.0.0.0", "--port", "8080"]
+# CMD ["uvicorn", "api.fast:app", "--host", "0.0.0.0", "--port", "8080"]
+
+# Start through entrypoint so GCS download can happen first
+CMD ["bash", "scripts/entrypoint.sh"]

@@ -12,7 +12,7 @@ pandas==2.2.3
 
 # Google Cloud
 # Uncomment if you use Google Cloud Storage
-# google-cloud-storage
+google-cloud-storage
 
 # API
 fastapi

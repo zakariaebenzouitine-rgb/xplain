@@ -17,5 +17,9 @@ pandas==2.2.3
 # API
 fastapi
 uvicorn
-python-multipart
-opencv-python-headless
+opencv-python
+Pillow
+# cv2
+# PIL
+torchvision
+torchxrayvision

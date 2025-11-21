@@ -1,0 +1,201 @@
+============================================================
+XPLAIN PROJECT GUIDE (Inference-only)
+============================================================
+
+Purpose
+-------
+This repository is an INFERENCE-ONLY package for chest X-ray captioning
+using a BLIP baseline fine-tuned on the CXIU dataset.
+
+Training is NOT part of this repo.
+Training happens externally (e.g., Kaggle notebooks).
+We only keep code needed to:
+- load a saved model
+- preprocess images safely
+- generate captions
+- serve predictions through FastAPI / Docker later
+
+
+------------------------------------------------------------
+1) High-level structure
+------------------------------------------------------------
+
+.
+├── api/
+│   └── fast.py
+├── src/
+│   └── xplain_package/
+│       ├── config.py
+│       ├── data/
+│       │   └── transforms.py
+│       ├── models/
+│       │   ├── blip.py
+│       │   └── registry.py
+│       ├── inference/
+│       │   └── predict.py
+│       ├── utils/
+│       │   ├── logging.py
+│       │   └── exceptions.py
+├── models/                 (NOT versioned, local checkpoints only)
+│   └── cxiu_blip_baseline/ (your BLIP save_pretrained folder)
+├── raw_data/               (optional local images for testing)
+├── requirements.txt
+├── requirements_dev.txt
+├── setup.py
+├── .env.example
+├── Makefile
+└── tests/
+
+
+------------------------------------------------------------
+2) What each important file does
+------------------------------------------------------------
+
+api/fast.py
+-----------
+FastAPI server.
+- Loads the model once at startup.
+- Offers a /predict endpoint that accepts an uploaded image
+  and returns {"caption": "..."}.
+This file should NEVER contain model logic.
+If model changes, only xplain_package changes.
+
+src/xplain_package/config.py
+----------------------------
+Central configuration.
+Reads environment variables (from .env) with safe defaults:
+- MODEL_FAMILY (currently "blip")
+- HF_MODEL_NAME (fallback model id)
+- LOCAL_MODEL_DIR (folder where checkpoint is stored)
+- DEVICE (auto/cpu/cuda)
+- MAX_NEW_TOKENS, BEAM_SIZE, LOG_LEVEL
+If you want to change a model later, start here.
+
+src/xplain_package/models/blip.py
+---------------------------------
+BLIP inference wrapper.
+- Loads BLIP from either:
+  (A) a local folder saved by save_pretrained(...)
+  (B) Hugging Face hub id (fallback)
+- Contains robust local-folder detection:
+  it looks for config.json in LOCAL_MODEL_DIR or one level below.
+- Has BlipCaptioner.generate(image) to get caption text.
+If BLIP family changes or we swap model, this is replaced/extended.
+
+src/xplain_package/models/registry.py
+-------------------------------------
+Single model switch point.
+- Chooses device (cpu/cuda/auto)
+- Chooses model source (local vs HF)
+- Returns correct model wrapper
+Right now supports only BLIP.
+If we add another family later (e.g., BLIP-2, CheXNet+decoder),
+we add a new wrapper file and update registry.py.
+
+src/xplain_package/data/transforms.py
+-------------------------------------
+Inference image loader.
+- load_image(path) -> PIL RGB image.
+We do NOT manually normalize/resize here because
+AutoProcessor for BLIP handles preprocessing internally.
+If a future model needs custom preprocessing, update this file.
+
+src/xplain_package/inference/predict.py
+---------------------------------------
+High-level inference entrypoint.
+- load_captioner(): loads + caches model once
+- predict_caption(image_path): returns caption for one image
+This is the function FastAPI and coworkers should call.
+
+src/xplain_package/utils/logging.py
+-----------------------------------
+Simple project-wide logger helper.
+Keeps logs consistent and avoids duplicated handlers.
+
+src/xplain_package/utils/exceptions.py
+--------------------------------------
+Custom error types for clean upstream error handling.
+
+setup.py
+--------
+Packaging configuration.
+Important fact: code is under src/ (src-layout).
+This file makes pip install/import work correctly.
+
+Makefile
+--------
+One-command helpers for coworkers:
+- install / install-dev
+- run_api
+- predict IMG=...
+- docker_build_local / docker_run_local
+Cloud-ready targets are placeholders without auth logic.
+
+
+------------------------------------------------------------
+3) Where to put the local BLIP baseline checkpoint
+------------------------------------------------------------
+
+Your Kaggle training used:
+  model.save_pretrained(OUTPUT_DIR)
+  processor.save_pretrained(OUTPUT_DIR)
+
+So you must copy the whole folder locally like:
+
+models/
+  cxiu_blip_baseline/
+    config.json
+    pytorch_model.bin
+    preprocessor_config.json
+    tokenizer_config.json
+    special_tokens_map.json
+    generation_config.json
+    ...
+
+Then set in .env:
+
+LOCAL_MODEL_DIR=models/cxiu_blip_baseline
+
+If LOCAL_MODEL_DIR=models instead, the code auto-searches
+one level down and uses the only valid folder it finds.
+
+
+------------------------------------------------------------
+4) How to run locally
+------------------------------------------------------------
+
+Install (runtime):
+  make install_requirements
+
+Install (dev / notebooks):
+  make install-dev
+
+Run API:
+  make run_api
+
+Predict without the API:
+  make predict IMG=raw_data/sample.png
+
+Docker local:
+  make docker_build_local
+  make docker_run_local
+
+
+------------------------------------------------------------
+5) How to change to a new model later
+------------------------------------------------------------
+
+1) Add a new wrapper in:
+     src/xplain_package/models/<new_model>.py
+2) Update:
+     src/xplain_package/models/registry.py
+   to route MODEL_FAMILY="<new_family>" to your new wrapper.
+3) Update .env / config.py variables if needed.
+4) API stays unchanged.
+
+Goal: minimal refactor when swapping models.
+
+
+============================================================
+End of guide
+============================================================

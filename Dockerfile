@@ -1,32 +1,44 @@
-# TODO: select a base image
-# Tip: start with a full base image, and then see if you can optimize with
-#      a slim or tensorflow base
+# ============================================================
+# Dockerfile for XPLAIN (Inference-only)
+#
+# Goals:
+# - Build a small image that runs FastAPI + BLIP inference
+# - No training code in the image
+# - Works with src/ package layout
+# - Model weights are NOT baked in by default (gitignored)
+#   -> container falls back to HF unless models/ is mounted
+# ============================================================
 
-#      Standard version
-FROM python:3.10.6
+# 1) Use a stable base Python version compatible with torch/transformers
+#    (3.10 matches your Kaggle baseline and is safe for torch)
+FROM python:3.10-slim
 
-#      Slim version
-# FROM python:3.12-slim
+# 2) Set working directory inside the container
+WORKDIR /app
 
-#      Tensorflow version (attention: won't run on Apple Silicon)
-# FROM tensorflow/tensorflow:2.16.1
+# 3) Copy requirements file first (better Docker cache)
+COPY requirements.txt /app/requirements.txt
 
-# Install requirements
-COPY requirements.txt requirements.txt
-RUN pip install --no-cache-dir --upgrade pip
-RUN pip install --no-cache-dir -r requirements.txt
+# 4) Upgrade pip and install runtime dependencies
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 
-# Copy our code
-COPY xplain_package xplain_package
-COPY api api
+# 5) Copy packaging metadata so "pip install ." works
+COPY setup.py /app/setup.py
+COPY README.md /app/README.md
 
-# Make directories that we need, but that are not included in the COPY
-RUN mkdir /raw_data
-RUN mkdir /models
+# 6) Copy inference code (src-layout) + API
+COPY src /app/src
+COPY api /app/api
 
-# COPY credentials.json credentials.json
+# 7) Install your package from src/
+#    (not editable in Docker; clean install)
+RUN pip install --no-cache-dir .
 
-# TODO: to speed up, you can load your model from MLFlow or Google Cloud Storage at startup using
-# RUN python -c 'replace_this_with_the_commands_you_need_to_run_to_load_the_model'
+# 8) Expose port expected by Cloud Run / local docker
+EXPOSE 8080
+ENV PORT=8080
 
-CMD uvicorn api.fast:app --host 0.0.0.0 --port $PORT
+# 9) Start FastAPI
+#    JSON CMD handles signals correctly
+CMD ["uvicorn", "api.fast:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -3,37 +3,34 @@ api/fast.py
 
 FastAPI server for X-ray captioning.
 
-This file is intentionally thin:
-- It does NOT contain model logic.
-- It simply calls the package inference function.
-
 Endpoints:
-- GET  /        -> health check
-- POST /predict -> upload an image and get a caption
+- GET  /             -> health check
+- POST /predict      -> single image caption
+- POST /predict_batch-> multiple images caption
 
-Later, this stays the same even if we change model family,
-because predict_caption() is stable.
+The API stays thin and delegates real work to xplain_package.
 """
 
 # FastAPI core objects
 from fastapi import FastAPI, UploadFile, File, HTTPException
 
-# We need tempfile to safely store uploads for a moment
+# We need tempfile to store uploads briefly
 import tempfile
 
-# os helps us manage file paths and delete temp files
+# os helps manage file paths and delete temp files
 import os
 
+# List is needed for typing multiple uploads
+from typing import List
+
 # Import inference helpers from our package
-# - load_captioner(): loads model once at startup (cached)
-# - predict_caption(path): runs BLIP on a saved image
-from xplain_package import load_captioner, predict_caption
+from xplain_package import load_captioner, predict_caption, predict_captions
 
 # Create the FastAPI app
 app = FastAPI(
     title="Xplain X-ray Captioning API",
     description="Inference-only API for BLIP chest X-ray explanations",
-    version="0.1.0",
+    version="0.2.0",
 )
 
 # ------------------------------------------------------------
@@ -42,11 +39,8 @@ app = FastAPI(
 @app.on_event("startup")
 def startup_event():
     """
-    This runs a single time when uvicorn starts.
-
-    We load the model here so:
-    - first user request is fast
-    - model stays in RAM (cached)
+    Runs once when uvicorn starts.
+    Loads the model into RAM and caches it.
     """
     load_captioner()
 
@@ -56,62 +50,109 @@ def startup_event():
 # ------------------------------------------------------------
 @app.get("/")
 def root():
-    """
-    Simple health check.
-    Useful to verify the API is running.
-    """
+    """Simple health check."""
     return {"status": "ok", "message": "Xplain API is up"}
 
 
 # ------------------------------------------------------------
-# Prediction route
+# Single-image prediction route
 # ------------------------------------------------------------
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     """
-    Predict a caption from an uploaded X-ray image.
-
-    Parameters
-    ----------
-    file : UploadFile
-        The uploaded image file.
+    Predict a caption from ONE uploaded X-ray image.
 
     Returns
     -------
-    dict
-        {"caption": "..."} on success.
+    dict : {"caption": "..."}
     """
 
-    # We'll keep track of temp file path so we can delete it no matter what
-    tmp_path = None
+    tmp_path = None  # track temp file path for cleanup
 
     try:
-        # 1) Read original extension (png/jpg/etc).
-        #    If missing, fallback to ".png"
+        # Extract file extension
         suffix = os.path.splitext(file.filename)[1] or ".png"
 
-        # 2) Create a secure temporary file on disk
-        #    delete=False because we want to close it first, then read it
+        # Create temporary file
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            # 3) Write uploaded bytes to disk
             tmp.write(await file.read())
             tmp_path = tmp.name
 
-        # 4) Run inference using our package
+        # Run inference
         caption = predict_caption(tmp_path)
 
-        # 5) Return JSON response
         return {"caption": caption}
 
     except Exception as e:
-        # If anything fails, return a 500 with the error string
         raise HTTPException(status_code=500, detail=str(e))
 
     finally:
-        # 6) Always clean up temp file
+        # Always remove temp file
         try:
             if tmp_path and os.path.exists(tmp_path):
                 os.remove(tmp_path)
         except Exception:
-            # If cleanup fails, ignore (not critical)
             pass
+
+
+# ------------------------------------------------------------
+# Multi-image prediction route
+# ------------------------------------------------------------
+@app.post("/predict_batch")
+async def predict_batch(files: List[UploadFile] = File(...)):
+    """
+    Predict captions from MULTIPLE uploaded X-ray images.
+
+    Parameters
+    ----------
+    files : list[UploadFile]
+        Several images uploaded together.
+
+    Returns
+    -------
+    dict
+        {
+          "results": [
+              {"filename": "...", "caption": "..."},
+              ...
+          ]
+        }
+    """
+
+    # We will store temp paths here to clean them up later
+    tmp_paths = []
+
+    try:
+        # 1) Save every uploaded file to a temp path
+        for f in files:
+
+            suffix = os.path.splitext(f.filename)[1] or ".png"
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(await f.read())
+                tmp_paths.append(tmp.name)
+
+        # 2) Run batch inference using package helper
+        captions = predict_captions(tmp_paths)
+
+        # 3) Pair each caption with its original filename
+        results = []
+        for f, cap in zip(files, captions):
+            results.append({
+                "filename": f.filename,
+                "caption": cap
+            })
+
+        return {"results": results}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        # 4) Always clean up temp files
+        for p in tmp_paths:
+            try:
+                if p and os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass

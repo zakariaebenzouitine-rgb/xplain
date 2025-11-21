@@ -37,7 +37,6 @@ models/
 *.pkl
 
 # Credentials (or files with potentially credentials inside)
-.env
 .env.yaml
 .credentials
 secrets.toml
@@ -45,3 +44,21 @@ secrets.toml
 
 # User defined extras
 # Complete to your desire
+
+# ============================================================
+# Local environment files (never commit)
+# ============================================================
+.env
+
+# ============================================================
+# Model weights / checkpoints (never commit)
+# We keep the folder name so code can still write there.
+# ============================================================
+models/*
+!models/.gitkeep
+
+# ============================================================
+# Optional local data samples (if you don't want them in git)
+# If you DO want to version raw_data samples, comment this out.
+# ============================================================
+# raw_data/*

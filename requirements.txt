@@ -23,3 +23,22 @@ Pillow
 # PIL
 torchvision
 torchxrayvision
+
+# ============================================================
+# Added for BLIP baseline inference (do NOT remove)
+# ============================================================
+
+# Core deep learning runtime
+torch
+
+# BLIP model + AutoProcessor (Hugging Face)
+transformers
+
+# Hugging Face dataset tools (optional for inference, used in your baseline/dev)
+datasets
+
+# Progress bars (lightweight, used in baseline notebooks)
+tqdm
+
+# Needed for FastAPI image upload endpoints
+python-multipart

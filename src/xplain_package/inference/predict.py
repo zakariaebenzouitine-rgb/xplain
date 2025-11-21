@@ -8,11 +8,16 @@ This is the ONLY module the API (and coworkers) should use.
 It provides:
 - load_captioner(): loads & caches the model once
 - predict_caption(image_path): returns caption for one image
+- predict_captions(image_paths): returns captions for many images
 
 Why caching?
 - So FastAPI does NOT reload the BLIP model per request.
 - Even locally, it avoids unnecessary reload time.
 """
+
+# -------------------------------
+# Imports
+# -------------------------------
 
 # Import central settings (env-configurable)
 from xplain_package.config import get_settings
@@ -59,7 +64,7 @@ def load_captioner():
     # Otherwise, load configuration from env vars or defaults
     settings = get_settings()
 
-    # Use the registry to load correct model family
+    # Use registry to load correct model family
     _MODEL = get_model(settings)
 
     # Log success
@@ -87,7 +92,6 @@ def predict_caption(image_path: str) -> str:
     # 1) Validate input
     # -------------------------------
     if not image_path:
-        # Raise a clean project-level error
         raise InvalidInputError("image_path is empty. Provide a valid image path.")
 
     # -------------------------------
@@ -110,12 +114,82 @@ def predict_caption(image_path: str) -> str:
     # -------------------------------
     caption = captioner.generate(
         image=image,
-        max_length=settings.MAX_NEW_TOKENS if hasattr(settings, "MAX_NEW_TOKENS") else 128,
+        max_length=(
+            settings.MAX_NEW_TOKENS
+            if hasattr(settings, "MAX_NEW_TOKENS")
+            else 128
+        ),
         num_beams=settings.BEAM_SIZE,
-        do_sample=False  # keep deterministic for medical text
+        do_sample=False  # deterministic is better for medical text
     )
 
     # -------------------------------
     # 6) Return text
     # -------------------------------
     return caption
+
+
+def predict_captions(image_paths):
+    """
+    Generate radiology explanations for MULTIPLE X-ray images.
+
+    Parameters
+    ----------
+    image_paths : list[str]
+        List of paths to local image files.
+
+    Returns
+    -------
+    list[str]
+        List of captions in the SAME order as image_paths.
+    """
+
+    # -------------------------------
+    # 1) Validate input list
+    # -------------------------------
+    if image_paths is None or len(image_paths) == 0:
+        raise InvalidInputError("image_paths is empty. Provide at least one image path.")
+
+    # -------------------------------
+    # 2) Load model ONCE (cached)
+    # -------------------------------
+    captioner = load_captioner()
+
+    # -------------------------------
+    # 3) Read inference settings ONCE
+    # -------------------------------
+    settings = get_settings()
+
+    # -------------------------------
+    # 4) Loop over images, generate captions
+    # -------------------------------
+    captions = []
+
+    for path in image_paths:
+
+        # Make sure each path is valid
+        if not path:
+            raise InvalidInputError("One of the image paths is empty.")
+
+        # Load PIL image from disk
+        image = load_image(path)
+
+        # Generate caption using same settings for all
+        caption = captioner.generate(
+            image=image,
+            max_length=(
+                settings.MAX_NEW_TOKENS
+                if hasattr(settings, "MAX_NEW_TOKENS")
+                else 128
+            ),
+            num_beams=settings.BEAM_SIZE,
+            do_sample=False
+        )
+
+        # Add to output list
+        captions.append(caption)
+
+    # -------------------------------
+    # 5) Return all captions
+    # -------------------------------
+    return captions

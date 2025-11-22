@@ -3,36 +3,66 @@ blip.py
 
 Inference-only BLIP wrapper.
 
-This matches your Kaggle baseline exactly:
-- Model class: BlipForConditionalGeneration
-- Processor class: AutoProcessor
-- Saved via:
-      model.save_pretrained(OUTPUT_DIR)
-      processor.save_pretrained(OUTPUT_DIR)
+🚨 IMPORTANT SAFETY CHANGE (NO INTERNET):
+- This project MUST NOT load models from Hugging Face Hub / the internet.
+- It MUST load ONLY:
+    1) from a LOCAL folder containing a finetuned BLIP save_pretrained(...)
+    2) OR from a folder that was downloaded from GCS into LOCAL_MODEL_DIR.
 
-Important:
-- BLIP expects a *folder* with config.json, pytorch_model.bin, etc.
-- NOT a single .pt file.
+Therefore:
+- We set Hugging Face offline mode.
+- We call from_pretrained(..., local_files_only=True).
+- We REMOVE any HF fallback logic.
+- If no valid local model is found -> we raise an error and crash startup.
+
+Expected local folder structure (created by save_pretrained):
+    <folder>/
+        config.json
+        pytorch_model.bin  OR model.safetensors
+        preprocessor_config.json
+        tokenizer_config.json (sometimes)
+        ...
 """
 
-# Standard library import
-import os  # used to check local folders and files
+# ============================================================
+# Standard library imports
+# ============================================================
 
-# Dataclass = clean way to store processor + model + device together
-from dataclasses import dataclass
+import os  # for path checks and offline env vars
+from dataclasses import dataclass  # convenient container for model + processor
+from typing import List, Optional  # type hints for clarity
 
-# PyTorch handles GPU/CPU device placement and no_grad inference
-import torch
+# ============================================================
+# Third-party imports
+# ============================================================
 
-# Hugging Face BLIP baseline classes (same as your notebook)
-from transformers import BlipForConditionalGeneration, AutoProcessor
+import torch  # device + no_grad inference
+from transformers import BlipForConditionalGeneration, AutoProcessor  # BLIP baseline classes
 
-# Project logger helper
-from xplain_package.utils.logging import get_logger
+# ============================================================
+# Project imports
+# ============================================================
+
+from xplain_package.utils.logging import get_logger  # central logger helper
+
+
+# ============================================================
+# Global "OFFLINE" enforcement for Transformers / HF
+# ============================================================
+# These environment variables make Hugging Face libraries refuse network calls.
+# Even if someone accidentally reintroduces HF fallback later,
+# Transformers will not download anything.
+
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_DATASETS_OFFLINE"] = "1"
 
 # Create logger for this module
 logger = get_logger(__name__)
 
+
+# ============================================================
+# BLIP Wrapper
+# ============================================================
 
 @dataclass
 class BlipCaptioner:
@@ -42,11 +72,11 @@ class BlipCaptioner:
     Attributes
     ----------
     processor : AutoProcessor
-        Handles image preprocessing + text decoding.
+        Handles image preprocessing + decoding text outputs.
     model : BlipForConditionalGeneration
         Vision encoder + text decoder.
     device : torch.device
-        CPU or GPU where inference runs.
+        CPU or GPU used for inference.
     """
 
     processor: AutoProcessor
@@ -60,17 +90,12 @@ class BlipCaptioner:
         device: torch.device,
     ) -> "BlipCaptioner":
         """
-        Load BLIP either from:
-        - LOCAL folder saved with save_pretrained(...)
-        - OR Hugging Face hub id.
+        Load BLIP ONLY from a LOCAL folder.
 
         Parameters
         ----------
         model_source : str
-            Example local folder:
-                "models/cxiu_blip_baseline"
-            Example HF hub id:
-                "Salesforce/blip-image-captioning-base"
+            Path to the local folder containing config.json, weights, etc.
         device : torch.device
             "cpu" or "cuda"
 
@@ -78,21 +103,41 @@ class BlipCaptioner:
         -------
         BlipCaptioner
             Ready-to-use inference wrapper.
+
+        Raises
+        ------
+        FileNotFoundError
+            If model_source does not exist locally or is invalid.
         """
 
         # Log for transparency
-        logger.info(f"Loading BLIP from: {model_source}")
+        logger.info(f"Loading BLIP from local source ONLY: {model_source}")
 
-        # Processor loads from local folder OR HF hub
-        processor = AutoProcessor.from_pretrained(model_source)
+        # Safety check: model_source must be a local directory
+        if not os.path.isdir(model_source):
+            raise FileNotFoundError(
+                f"BLIP model folder not found locally: {model_source}. "
+                "This project does NOT allow Hugging Face / internet loading."
+            )
 
-        # Model loads from local folder OR HF hub
-        model = BlipForConditionalGeneration.from_pretrained(model_source)
+        # Processor loads ONLY from local folder
+        processor = AutoProcessor.from_pretrained(
+            model_source,
+            local_files_only=True,   # 🚫 forbids downloading
+            trust_remote_code=False  # extra safety
+        )
 
-        # Move model to the chosen device
+        # Model loads ONLY from local folder
+        model = BlipForConditionalGeneration.from_pretrained(
+            model_source,
+            local_files_only=True,   # 🚫 forbids downloading
+            trust_remote_code=False
+        )
+
+        # Move model to chosen device (CPU/GPU)
         model.to(device)
 
-        # Eval mode = inference only (no dropout)
+        # Set inference mode
         model.eval()
 
         return cls(processor=processor, model=model, device=device)
@@ -112,84 +157,89 @@ class BlipCaptioner:
         image : PIL.Image.Image
             Input X-ray (PIL object).
         max_length : int
-            Maximum total output length.
-            (Aligns with Kaggle MAX_LENGTH.)
+            Maximum output tokens.
         num_beams : int
-            Beam width (you used 3 for best outputs).
+            Beam search width.
         do_sample : bool
             False = deterministic beam search (recommended for medical).
-            True  = random sampling (more creative but less stable).
 
         Returns
         -------
         str
-            Radiology explanation / caption.
+            Generated radiology explanation.
         """
 
-        # Convert PIL image into model tensors
+        # Convert PIL image -> BLIP tensors
         encoding = self.processor(images=image, return_tensors="pt")
 
         # Move tensors to same device as model
         encoding = encoding.to(self.device)
 
-        # Disable gradients for speed & memory safety
+        # Disable gradients for speed and memory
         with torch.no_grad():
-
-            # Generate output token IDs
             generated_ids = self.model.generate(
-                pixel_values=encoding["pixel_values"],  # BLIP expects pixel_values
+                pixel_values=encoding["pixel_values"],
                 max_length=max_length,
                 num_beams=num_beams,
                 do_sample=do_sample,
             )
 
-        # Decode IDs to text
+        # Decode tokens -> text
         generated_text = self.processor.batch_decode(
             generated_ids,
             skip_special_tokens=True
-        )[0]  # batch size = 1
+        )[0]
 
         return generated_text
 
 
+# ============================================================
+# Local model resolution (NO HF fallback)
+# ============================================================
+
 def resolve_model_source(
     local_model_dir: str,
-    hf_model_name: str,
+    hf_model_name: Optional[str] = None,
 ) -> str:
     """
-    Decide where to load the model from.
+    Decide where to load the model from, STRICTLY locally.
 
-    Robust logic:
-
-    1) If local_model_dir itself looks like a HF "save_pretrained" folder
-       (contains config.json), load from there.
-
-    2) If local_model_dir is only a parent folder (e.g. "models/"),
-       search ONE level down for subfolders that contain config.json.
-       - If exactly ONE is found, load from it.
-       - If multiple are found, don't guess -> fallback to HF.
-
-    3) If nothing valid locally, fallback to HF model id.
+    Rules:
+    1) If local_model_dir is a valid pretrained folder (config.json exists),
+       return it.
+    2) If local_model_dir is a parent folder, search ONE level down for valid
+       pretrained folders.
+       - If exactly ONE is found, return it.
+       - If multiple are found, raise (no guessing).
+    3) If nothing valid locally, raise (NO HF fallback allowed).
 
     Parameters
     ----------
     local_model_dir : str
-        Could be:
-        - exact model folder
-        - OR parent directory containing model folder
-    hf_model_name : str
-        HF fallback (Salesforce/blip-image-captioning-base)
+        Exact model folder OR parent folder.
+    hf_model_name : Optional[str]
+        Kept only for backward compatibility with old registry calls.
+        It is NOT used anymore.
 
     Returns
     -------
     str
-        A path or HF hub id to pass to from_pretrained(...)
+        A local folder path to pass into from_pretrained(...)
+
+    Raises
+    ------
+    FileNotFoundError
+        If no valid local pretrained model is found.
+    RuntimeError
+        If multiple valid models are found (ambiguous).
     """
 
-    # If no local dir was provided, go HF
+    # If no local dir provided, this is a fatal configuration error
     if not local_model_dir:
-        logger.info("No local_model_dir provided; using HF model.")
-        return hf_model_name
+        raise FileNotFoundError(
+            "LOCAL_MODEL_DIR is empty. "
+            "Set it to a local folder containing your finetuned BLIP model."
+        )
 
     # ------------------------------------------------------------
     # Case 1) local_model_dir is already a pretrained folder
@@ -207,21 +257,20 @@ def resolve_model_source(
     # ------------------------------------------------------------
     if os.path.isdir(local_model_dir):
 
-        # List everything inside (files/folders)
+        # List everything inside parent folder
         children = os.listdir(local_model_dir)
 
-        # Collect child folders that contain config.json
-        candidate_folders = []
+        # Look for child folders containing config.json
+        candidate_folders: List[str] = []
+
         for child in children:
-
             child_path = os.path.join(local_model_dir, child)
+            child_config = os.path.join(child_path, "config.json")
 
-            if os.path.isdir(child_path):
-                child_config = os.path.join(child_path, "config.json")
-                if os.path.isfile(child_config):
-                    candidate_folders.append(child_path)
+            if os.path.isdir(child_path) and os.path.isfile(child_config):
+                candidate_folders.append(child_path)
 
-        # If exactly one valid folder, use it
+        # Exactly one valid model -> choose it
         if len(candidate_folders) == 1:
             chosen = candidate_folders[0]
             logger.info(
@@ -230,20 +279,19 @@ def resolve_model_source(
             )
             return chosen
 
-        # If multiple valid folders exist, don't guess
+        # Multiple valid models -> ambiguous, crash
         if len(candidate_folders) > 1:
-            logger.warning(
+            raise RuntimeError(
                 f"Multiple pretrained model folders found inside {local_model_dir}: "
-                f"{candidate_folders}. Falling back to HF model id. "
-                f"(Set LOCAL_MODEL_DIR to the exact folder you want.)"
+                f"{candidate_folders}. "
+                f"Set LOCAL_MODEL_DIR to the exact folder you want."
             )
-            return hf_model_name
 
     # ------------------------------------------------------------
-    # Case 3) nothing valid locally -> fallback HF
+    # Case 3) nothing valid locally -> fatal error (NO HF)
     # ------------------------------------------------------------
-    logger.info(
+    raise FileNotFoundError(
         f"No valid local pretrained model found in: {local_model_dir}. "
-        f"Falling back to HF model: {hf_model_name}"
+        "HF / internet fallback is disabled. "
+        "Either mount your models folder OR set GCS_MODEL_URI so entrypoint downloads it."
     )
-    return hf_model_name

@@ -1,44 +1,78 @@
-# data science
+# ============================================================
+# requirements.txt  (RUNTIME)
+#
+# Inference + API only.
+# Must work in python:slim Docker WITHOUT system GUI libs.
+#
+# Key fix:
+# - Use opencv-python-headless instead of opencv-python
+#   to avoid libGL.so.1 dependency.
+# ============================================================
+
+
+# -----------------------------
+# General data / utils
+# -----------------------------
 numpy<2.0.0
 pandas==2.2.3
 
-# Uncomment if you use sklearn
-# scikit-learn==1.6.1
 
-# Install the correct TensorFlow version
-# Uncomment if you use TensorFlow
-# tensorflow==2.16.2    # For both Intel and Apple silicon
-# keras==3.8.0
-
+# -----------------------------
 # Google Cloud
-# Uncomment if you use Google Cloud Storage
-google-cloud-storage
+# (optional model download from GCS)
+# -----------------------------
+google-cloud-storage>=2.16.0
 
+
+# -----------------------------
 # API
-fastapi
-uvicorn
-opencv-python
-Pillow
-# cv2
-# PIL
-torchvision
-torchxrayvision
+# -----------------------------
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9   # for UploadFile endpoints
 
-# ============================================================
-# Added for BLIP baseline inference (do NOT remove)
-# ============================================================
 
-# Core deep learning runtime
-torch
+# -----------------------------
+# Imaging
+# -----------------------------
+Pillow>=10.2.0
 
-# BLIP model + AutoProcessor (Hugging Face)
-transformers
+# ✅ Headless OpenCV (NO libGL needed in Docker slim)
+opencv-python-headless>=4.9.0.80
 
-# Hugging Face dataset tools (optional for inference, used in your baseline/dev)
-datasets
 
-# Progress bars (lightweight, used in baseline notebooks)
-tqdm
+# -----------------------------
+# Torch / vision stack
+# -----------------------------
+torch>=2.1.0
+torchvision>=0.16.0
+torchxrayvision>=1.2.1
 
-# Needed for FastAPI image upload endpoints
-python-multipart
+
+# -----------------------------
+# BLIP inference (Transformers)
+# -----------------------------
+transformers>=4.40.0
+accelerate>=0.30.0
+safetensors>=0.4.2
+
+
+# -----------------------------
+# Hugging Face datasets tools
+# (optional but safe)
+# -----------------------------
+datasets>=2.19.0
+
+
+# -----------------------------
+# Progress / logging
+# -----------------------------
+tqdm>=4.66.0
+
+
+# -----------------------------
+# Configuration
+# -----------------------------
+pydantic>=2.6.0
+pydantic-settings>=2.2.0
+python-dotenv>=1.0.1

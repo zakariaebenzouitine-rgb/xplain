@@ -1,195 +1,182 @@
 """
 predict.py
 
-High-level inference functions.
+Central inference entrypoints for the project.
 
-This is the ONLY module the API (and coworkers) should use.
+This module MUST expose these functions because other files import them:
 
-It provides:
-- load_captioner(): loads & caches the model once
-- predict_caption(image_path): returns caption for one image
-- predict_captions(image_paths): returns captions for many images
+    - load_captioner()
+    - predict_caption(image)      -> single image inference
+    - predict_captions(images)    -> batch inference
 
-Why caching?
-- So FastAPI does NOT reload the BLIP model per request.
-- Even locally, it avoids unnecessary reload time.
+Design goals:
+- Offline-first: only load from LOCAL_MODEL_DIR or GCS_MODEL_URI.
+- NO automatic HuggingFace fallback (to avoid "wrong model" surprises).
+- Robust to future model changes via models.registry.get_model().
 """
 
-# -------------------------------
-# Imports
-# -------------------------------
+from __future__ import annotations
 
-# Import central settings (env-configurable)
-from xplain_package.config import get_settings
+import threading
+from typing import List, Optional, Union
 
-# Import safe image loader
-from xplain_package.data.transforms import load_image
+import torch
+from PIL import Image
 
-# Import model registry (picks BLIP + device + local/HF source)
+from xplain_package.config import settings          # global config (env-driven)
 from xplain_package.models.registry import get_model
-
-# Logger for clean debug messages
+from xplain_package.preprocessing import preprocess_image
 from xplain_package.utils.logging import get_logger
 
-# Custom clean error for user-facing mistakes
-from xplain_package.utils.exceptions import InvalidInputError
-
-# Create a logger for this module
+# ------------------------------------------------------------
+# Logger for this module
+# ------------------------------------------------------------
 logger = get_logger(__name__)
 
 # ------------------------------------------------------------
-# Model cache (module-level global)
+# Global cached objects
+# We keep them in memory so:
+#   - FastAPI startup loads once
+#   - Requests reuse the model (fast)
 # ------------------------------------------------------------
-# We keep one model instance in memory after first load.
-# This is perfect for FastAPI startup and repeated inference.
 _MODEL = None
+_PROCESSOR = None
+_DEVICE = None
+
+# A lock to avoid double-loading in parallel startup situations
+_LOAD_LOCK = threading.Lock()
 
 
-def load_captioner():
+def load_captioner() -> None:
     """
-    Load the captioning model ONCE and keep it in memory.
+    Load the model + processor ONCE and cache them globally.
 
-    Returns
-    -------
-    BlipCaptioner (or future model wrapper)
-        A ready-to-use model wrapper.
+    This is called:
+    - at FastAPI startup
+    - or lazily inside predict_* if someone forgot startup
+
+    It uses get_model(settings) which:
+    - loads from LOCAL_MODEL_DIR
+    - OR downloads from GCS_MODEL_URI into LOCAL_MODEL_DIR (entrypoint)
+    - and raises if nothing is there.
+
+    NO HuggingFace fallback here.
     """
+    global _MODEL, _PROCESSOR, _DEVICE
 
-    global _MODEL
+    if _MODEL is not None and _PROCESSOR is not None:
+        # Already loaded: nothing to do
+        return
 
-    # If we already loaded the model earlier, reuse it.
-    if _MODEL is not None:
-        return _MODEL
+    with _LOAD_LOCK:
+        # Double-check inside lock
+        if _MODEL is not None and _PROCESSOR is not None:
+            return
 
-    # Otherwise, load configuration from env vars or defaults
-    settings = get_settings()
+        logger.info("Loading captioner (offline-only)…")
 
-    # Use registry to load correct model family
-    _MODEL = get_model(settings)
+        # Device choice: GPU if available, else CPU
+        _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info(f"Using device: {_DEVICE}")
 
-    # Log success
-    logger.info("Model loaded and cached successfully.")
+        # Get model wrapper from registry (future-proof)
+        captioner = get_model(settings)
 
-    return _MODEL
+        # Extract actual HF objects
+        _MODEL = captioner.model.to(_DEVICE)
+        _PROCESSOR = captioner.processor
+
+        # Put model in eval mode for inference
+        _MODEL.eval()
+
+        logger.info("Model loaded and cached successfully.")
 
 
-def predict_caption(image_path: str) -> str:
+@torch.no_grad()
+def predict_caption(
+    image: Union[Image.Image, bytes, str]
+) -> str:
     """
-    Generate a radiology explanation for ONE X-ray image.
+    Predict a radiology explanation for ONE image.
 
     Parameters
     ----------
-    image_path : str
-        Path to a local image file.
+    image:
+        - PIL.Image.Image
+        - raw bytes (FastAPI UploadFile.read())
+        - path string
 
     Returns
     -------
-    str
-        Generated caption (radiology explanation).
+    text:
+        A generated caption/explanation string.
     """
+    # Ensure model is loaded
+    load_captioner()
 
-    # -------------------------------
-    # 1) Validate input
-    # -------------------------------
-    if not image_path:
-        raise InvalidInputError("image_path is empty. Provide a valid image path.")
+    # Preprocess input into a clean RGB PIL image
+    pil_img = preprocess_image(image)
 
-    # -------------------------------
-    # 2) Load model (cached)
-    # -------------------------------
-    captioner = load_captioner()
+    # Convert to BLIP inputs (processor handles resize/normalize)
+    inputs = _PROCESSOR(images=pil_img, return_tensors="pt")
+    inputs = {k: v.to(_DEVICE) for k, v in inputs.items()}
 
-    # -------------------------------
-    # 3) Load image safely
-    # -------------------------------
-    image = load_image(image_path)
-
-    # -------------------------------
-    # 4) Read inference settings
-    # -------------------------------
-    settings = get_settings()
-
-    # -------------------------------
-    # 5) Generate caption
-    # -------------------------------
-    caption = captioner.generate(
-        image=image,
-        max_length=(
-            settings.MAX_NEW_TOKENS
-            if hasattr(settings, "MAX_NEW_TOKENS")
-            else 128
-        ),
+    # Generate text
+    generated_ids = _MODEL.generate(
+        pixel_values=inputs["pixel_values"],
+        max_new_tokens=settings.MAX_NEW_TOKENS,
         num_beams=settings.BEAM_SIZE,
-        do_sample=False  # deterministic is better for medical text
+        do_sample=False,  # deterministic
     )
 
-    # -------------------------------
-    # 6) Return text
-    # -------------------------------
-    return caption
+    # Decode IDs into a string
+    text = _PROCESSOR.batch_decode(
+        generated_ids,
+        skip_special_tokens=True
+    )[0]
+
+    return text.strip()
 
 
-def predict_captions(image_paths):
+@torch.no_grad()
+def predict_captions(
+    images: List[Union[Image.Image, bytes, str]]
+) -> List[str]:
     """
-    Generate radiology explanations for MULTIPLE X-ray images.
+    Predict explanations for a BATCH of images.
 
     Parameters
     ----------
-    image_paths : list[str]
-        List of paths to local image files.
+    images:
+        list of images in any supported format.
 
     Returns
     -------
-    list[str]
-        List of captions in the SAME order as image_paths.
+    texts:
+        list of generated strings (same order as input).
     """
+    # Ensure model is loaded
+    load_captioner()
 
-    # -------------------------------
-    # 1) Validate input list
-    # -------------------------------
-    if image_paths is None or len(image_paths) == 0:
-        raise InvalidInputError("image_paths is empty. Provide at least one image path.")
+    # Preprocess each image to PIL RGB
+    pil_images = [preprocess_image(img) for img in images]
 
-    # -------------------------------
-    # 2) Load model ONCE (cached)
-    # -------------------------------
-    captioner = load_captioner()
+    # Batch encoding
+    inputs = _PROCESSOR(images=pil_images, return_tensors="pt")
+    inputs = {k: v.to(_DEVICE) for k, v in inputs.items()}
 
-    # -------------------------------
-    # 3) Read inference settings ONCE
-    # -------------------------------
-    settings = get_settings()
+    # Batch generation
+    generated_ids = _MODEL.generate(
+        pixel_values=inputs["pixel_values"],
+        max_new_tokens=settings.MAX_NEW_TOKENS,
+        num_beams=settings.BEAM_SIZE,
+        do_sample=False,
+    )
 
-    # -------------------------------
-    # 4) Loop over images, generate captions
-    # -------------------------------
-    captions = []
+    # Decode batch
+    texts = _PROCESSOR.batch_decode(
+        generated_ids,
+        skip_special_tokens=True
+    )
 
-    for path in image_paths:
-
-        # Make sure each path is valid
-        if not path:
-            raise InvalidInputError("One of the image paths is empty.")
-
-        # Load PIL image from disk
-        image = load_image(path)
-
-        # Generate caption using same settings for all
-        caption = captioner.generate(
-            image=image,
-            max_length=(
-                settings.MAX_NEW_TOKENS
-                if hasattr(settings, "MAX_NEW_TOKENS")
-                else 128
-            ),
-            num_beams=settings.BEAM_SIZE,
-            do_sample=False
-        )
-
-        # Add to output list
-        captions.append(caption)
-
-    # -------------------------------
-    # 5) Return all captions
-    # -------------------------------
-    return captions
+    return [t.strip() for t in texts]

@@ -1,95 +1,156 @@
 """
 registry.py
 
-This file acts like a "model router".
+Model registry / factory.
 
-The rest of the project will call ONLY:
-    get_model(settings)
+Goal:
+- Keep the code robust if we switch model families later.
+- Centralize model selection in ONE place.
 
-And this registry will:
-1) decide CPU vs GPU automatically
-2) decide whether to load from local folder or HF hub
-3) return the correct model wrapper (BLIP for now)
+🚨 IMPORTANT SAFETY CHANGE (NO INTERNET):
+- We do NOT allow Hugging Face / online fallback anymore.
+- Every model MUST be loaded from a LOCAL folder.
+- "Bucket mode" works because entrypoint downloads the model
+  from GCS into LOCAL_MODEL_DIR before FastAPI starts.
 
-If we change to another model later, we add a new wrapper and
-just extend get_model(...) with another branch.
+So the loading logic is:
+    1) entrypoint.sh (optional) downloads GCS_MODEL_URI -> LOCAL_MODEL_DIR
+    2) registry.py loads from LOCAL_MODEL_DIR strictly offline
 """
 
-# We need torch to manage devices (cpu/cuda) and check GPU availability
-import torch
+# ============================================================
+# Standard library imports
+# ============================================================
 
-# Import the Settings dataclass from config
-from xplain_package.config import Settings
+from typing import Any  # generic types for settings compatibility
 
-# Import BLIP wrapper + helper to choose local vs HF source
-from xplain_package.models.blip import BlipCaptioner, resolve_model_source
+# ============================================================
+# Third-party imports
+# ============================================================
+
+import torch  # used only to detect device
+
+# ============================================================
+# Project imports
+# ============================================================
+
+from xplain_package.utils.logging import get_logger  # logger utility
+
+# BLIP family (offline-only wrapper)
+from xplain_package.models.blip import (
+    BlipCaptioner,       # inference wrapper
+    resolve_model_source # local model discovery (NO HF fallback)
+)
+
+# Create module logger
+logger = get_logger(__name__)
 
 
-def resolve_device(device_setting: str) -> torch.device:
+# ============================================================
+# Helper: device resolution
+# ============================================================
+
+def get_device(settings: Any) -> torch.device:
     """
-    Convert a string device setting into a torch.device.
+    Decide which device to use.
+
+    We keep this flexible because:
+    - settings can change later
+    - different machines may or may not have CUDA
+
+    Priority:
+    1) If settings.DEVICE exists, use it ("cpu" or "cuda")
+    2) Else use CUDA if available
+    3) Else CPU
 
     Parameters
     ----------
-    device_setting : str
-        Either:
-        - "auto"  -> use GPU if available, else CPU
-        - "cpu"   -> force CPU
-        - "cuda"  -> force GPU (will crash if no GPU)
+    settings : Any
+        Settings object (from config.py). We use getattr to stay robust.
 
     Returns
     -------
     torch.device
-        The device to use for inference.
+        Torch device object.
     """
 
-    # If user wants automatic device selection:
-    if device_setting == "auto":
-        # Check if a CUDA GPU is available
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-        # Otherwise use CPU
-        return torch.device("cpu")
+    # Try to use an explicit DEVICE from settings if present
+    device_str = getattr(settings, "DEVICE", None)
 
-    # If user explicitly set "cpu" or "cuda", trust them
-    return torch.device(device_setting)
+    if device_str:
+        # Respect explicit configuration
+        return torch.device(device_str)
+
+    # Otherwise auto-detect
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def get_model(settings: Settings):
+# ============================================================
+# Main factory: load the right model family
+# ============================================================
+
+def get_model(settings: Any):
     """
-    Main entrypoint for loading a model.
+    Load the selected model family.
+
+    🚫 NO INTERNET:
+    - We do not use HF fallback.
+    - We do not call from_pretrained with remote IDs.
+
+    The ONLY valid source is LOCAL_MODEL_DIR,
+    which may come from:
+        - a folder already present in repo (local mode)
+        - OR a downloaded GCS folder (cloud mode)
 
     Parameters
     ----------
-    settings : Settings
-        Central configuration object (from config.py).
+    settings : Any
+        Must contain at least:
+            - MODEL_FAMILY (ex: "blip")
+            - LOCAL_MODEL_DIR (ex: "models/cxiu_blip_baseline")
+
+        HF_MODEL_NAME may exist for backward compatibility,
+        but it is ignored.
 
     Returns
     -------
-    Any model wrapper (currently BlipCaptioner).
+    model wrapper instance (e.g., BlipCaptioner)
     """
 
-    # 1) Choose device based on settings
-    device = resolve_device(settings.DEVICE)
+    # Read model family, default to "blip" if missing
+    model_family = getattr(settings, "MODEL_FAMILY", "blip").lower()
 
-    # 2) Decide where model loads from:
-    #    - if local folder exists -> use it
-    #    - else -> use HF model id
-    model_source = resolve_model_source(
-        local_model_dir=settings.LOCAL_MODEL_DIR,
-        hf_model_name=settings.HF_MODEL_NAME,
-    )
+    # Read local model dir (must be set)
+    local_model_dir = getattr(settings, "LOCAL_MODEL_DIR", None)
 
-    # 3) Pick model family (for now only BLIP)
-    if settings.MODEL_FAMILY.lower() == "blip":
-        # Load BLIP from local folder or HF hub
+    # Log what we are about to do
+    logger.info(f"Model family requested: {model_family}")
+    logger.info(f"Local model directory: {local_model_dir}")
+
+    # Choose device
+    device = get_device(settings)
+    logger.info(f"Inference device: {device}")
+
+    # ------------------------------------------------------------
+    # BLIP FAMILY (offline only)
+    # ------------------------------------------------------------
+    if model_family == "blip":
+
+        # Resolve to a real local pretrained folder
+        # This raises if nothing valid is found.
+        model_source = resolve_model_source(local_model_dir)
+
+        # Load BLIP strictly from local files
         return BlipCaptioner.from_pretrained(
             model_source=model_source,
-            device=device
+            device=device,
         )
 
-    # 4) If model family is unknown, raise a clear error
-    raise ValueError(
-        f"Unknown MODEL_FAMILY: {settings.MODEL_FAMILY}. "
-        "Supported families: ['blip']"
+    # ------------------------------------------------------------
+    # Future families go here
+    # ------------------------------------------------------------
+    raise NotImplementedError(
+        f"Unknown MODEL_FAMILY='{model_family}'. "
+        "Supported families: ['blip']. "
+        "If you add a new family, implement it here."
     )

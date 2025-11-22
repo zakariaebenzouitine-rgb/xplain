@@ -17,3 +17,5 @@ pandas==2.2.3
 # API
 fastapi
 uvicorn
+python-multipart
+opencv-python-headless

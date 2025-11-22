@@ -1,0 +1,282 @@
+=====================================================================
+XPLAIN PROJECT GUIDE
+=====================================================================
+
+This guide explains:
+1) What each important file/folder does
+2) How to run the project locally or in Docker
+3) Where to change things when switching models later
+4) How the future Cloud Run deployment will work
+
+IMPORTANT DESIGN RULES (TEAM CONTRACT)
+---------------------------------------------------------------------
+- This repo contains INFERENCE ONLY.
+- NO training code lives here.
+- Model weights are NOT committed in git.
+- No authentication / credentials are stored in the repo.
+- Everything must work for any coworker after pulling.
+
+
+=====================================================================
+1) PROJECT STRUCTURE
+=====================================================================
+
+.
+├── api/
+│   ├── fast.py
+│   └── __init__.py
+│
+├── src/xplain_package/
+│   ├── __init__.py
+│   ├── config.py
+│   ├── preprocessing.py
+│   ├── data/
+│   │   ├── __init__.py
+│   │   └── transforms.py
+│   ├── inference/
+│   │   ├── __init__.py
+│   │   └── predict.py
+│   ├── models/
+│   │   ├── __init__.py
+│   │   ├── blip.py
+│   │   └── registry.py
+│   ├── io/
+│   │   ├── __init__.py
+│   │   └── gcs.py
+│   └── utils/
+│       ├── __init__.py
+│       ├── exceptions.py
+│       └── logging.py
+│
+├── models/                 <-- ROOT models folder (weights live here locally)
+│   └── .gitkeep            <-- keeps folder in git, but NOT weights
+│
+├── scripts/
+│   ├── entrypoint.sh
+│   ├── bootstrap_artifact_registry.sh
+│   └── deploy_cloud_run.sh
+│
+├── Dockerfile
+├── Makefile
+├── requirements.txt
+├── requirements_dev.txt
+├── setup.py
+├── DEPLOYMENT_CHECKLIST.md
+└── README.md
+
+
+=====================================================================
+2) KEY FILES EXPLAINED
+=====================================================================
+
+-----------------------------------
+api/fast.py
+-----------------------------------
+FastAPI application.
+- Defines endpoints:
+  /           -> health check
+  /predict    -> predict one image
+  /predict_batch -> predict multiple images
+- Loads model ON STARTUP by calling:
+  xplain_package.inference.predict.load_captioner()
+
+-----------------------------------
+src/xplain_package/config.py
+-----------------------------------
+Reads configuration from environment variables.
+All deployers/coworkers ONLY change env variables, not code.
+
+Important vars:
+- MODEL_FAMILY      (default: "blip")
+- LOCAL_MODEL_DIR   (default: "models")
+- HF_MODEL_NAME     (default: BLIP base)
+- BEAM_SIZE
+- MAX_NEW_TOKENS
+
+-----------------------------------
+src/xplain_package/models/registry.py
+-----------------------------------
+Central model selector.
+- Based on MODEL_FAMILY, returns correct captioner class.
+- This is THE ONLY place to edit when you add a new model family later.
+
+Example:
+if MODEL_FAMILY="blip" -> uses BlipCaptioner.
+
+-----------------------------------
+src/xplain_package/models/blip.py
+-----------------------------------
+BLIP wrapper.
+- Loads finetuned model from LOCAL_MODEL_DIR if present.
+- Otherwise falls back to Hugging Face HF_MODEL_NAME.
+- Exposes .generate_caption(image) used by inference.
+
+-----------------------------------
+src/xplain_package/data/transforms.py
+-----------------------------------
+Image preprocessing for inference.
+- Currently minimal (BLIP processor mostly handles preprocessing).
+- If you switch models later, update transforms here.
+
+-----------------------------------
+src/xplain_package/inference/predict.py
+-----------------------------------
+High-level inference API.
+- load_captioner() loads & caches model.
+- predict_one_image() returns one caption.
+- predict_batch_images() returns list of captions.
+
+The FastAPI server imports inference from here.
+
+-----------------------------------
+src/xplain_package/io/gcs.py
+-----------------------------------
+Optional GCS downloader used only in cloud.
+- If GCS_MODEL_URI env var is empty -> NO-OP.
+- If set -> downloads model folder to LOCAL_MODEL_DIR.
+- Contains NO auth logic.
+
+-----------------------------------
+scripts/entrypoint.sh
+-----------------------------------
+Docker entrypoint.
+Runs:
+1) python -m xplain_package.io.gcs   (optional download)
+2) uvicorn api.fast:app
+
+So cloud containers auto-fetch model before serving.
+
+-----------------------------------
+scripts/bootstrap_artifact_registry.sh
+-----------------------------------
+ONE-TIME setup for a GCP project in the future.
+- Enables Artifact Registry + Cloud Run APIs
+- Creates docker repo if missing
+- Configures docker auth
+NO auth in repo; deployer must login externally.
+
+-----------------------------------
+scripts/deploy_cloud_run.sh
+-----------------------------------
+Future deploy script.
+- Deploys to Cloud Run using the prod image
+- Reads env vars from .env + .env.yaml
+NO auth in repo.
+
+-----------------------------------
+DEPLOYMENT_CHECKLIST.md
+-----------------------------------
+Full human-readable deployment playbook.
+Follow it later when deploying in any GCP account.
+
+
+=====================================================================
+3) HOW TO RUN LOCALLY (NO DOCKER)
+=====================================================================
+
+1) Create venv
+   python -m venv .venv
+   source .venv/bin/activate
+
+2) Install runtime deps + package
+   make install_requirements
+   pip install -e .
+
+3) Create .env
+   cp .env.example .env
+   Edit minimal vars if needed:
+     MODEL_FAMILY=blip
+     LOCAL_MODEL_DIR=models/cxiu_blip_baseline
+     HF_MODEL_NAME=Salesforce/blip-image-captioning-base
+
+4) Place finetuned model locally (optional but recommended)
+   models/cxiu_blip_baseline/
+     config.json
+     pytorch_model.bin
+     preprocessor_config.json
+     tokenizer files...
+
+5) Run API
+   make run_api
+   Open: http://127.0.0.1:8000/docs
+
+
+=====================================================================
+4) HOW TO RUN WITH DOCKER (LOCAL TEST)
+=====================================================================
+
+1) Build image
+   make docker_build_local
+
+2) Run container WITH local weights mounted
+   docker run --rm \
+     -p 8080:8080 \
+     --env-file .env \
+     -v $(pwd)/models:/app/models \
+     api:local
+
+3) Open Swagger
+   http://127.0.0.1:8080/docs
+
+
+=====================================================================
+5) HOW TO CHANGE MODEL LATER (MINIMAL EDITS)
+=====================================================================
+
+Goal: switching model should require only env changes + maybe preprocessing.
+
+Typical changes:
+1) Upload new model folder to GCS (future)
+2) Change env vars:
+   MODEL_FAMILY=new_family   (if different)
+   GCS_MODEL_URI=gs://bucket/new_folder
+   LOCAL_MODEL_DIR=models/new_folder
+   HF_MODEL_NAME=some-hf-fallback
+
+3) If new model needs different preprocessing:
+   Edit src/xplain_package/data/transforms.py
+
+4) If new model family:
+   - Add new wrapper file in src/xplain_package/models/
+   - Register it in registry.py
+
+
+=====================================================================
+6) DEV REQUIREMENTS
+=====================================================================
+
+- requirements.txt = runtime only (stable for Docker/Cloud Run)
+- requirements_dev.txt = notebooks/testing tools (optional)
+
+Install dev bundle:
+  pip install -U pip setuptools wheel
+  pip install -e ".[dev]"
+
+
+=====================================================================
+7) TROUBLESHOOTING
+=====================================================================
+
+Problem: "No module named xplain_package"
+Fix:
+  pip install -e .
+
+Problem: FastAPI crashes saying model not found
+Fix:
+  Ensure .env LOCAL_MODEL_DIR points to existing folder
+  Example:
+    LOCAL_MODEL_DIR=models/cxiu_blip_baseline
+
+Problem: Docker builds but can't load model
+Fix:
+  Run docker with models mount:
+    -v $(pwd)/models:/app/models
+
+Problem: Coworker doesn't see src/xplain_package/models
+Fix:
+  Ensure .gitignore ignores ONLY /models root
+  Ensure src/xplain_package/models is committed.
+
+=====================================================================
+END
+=====================================================================

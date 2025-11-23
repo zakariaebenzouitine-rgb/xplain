@@ -1,7 +1,7 @@
 import streamlit as st
 import requests
 
-API_URL = "http://127.0.0.1:8000/predict"
+API_URL = "https://xplain-api-830300217028.europe-west1.run.app/predict"
 
 # --------- PAGE CONFIG ---------
 st.set_page_config(
